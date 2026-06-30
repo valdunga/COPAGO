@@ -1120,6 +1120,87 @@ function parseCSVLine(line) {
   return result;
 }
 
+// ============================================================
+// NORMALIZATION MAPS (CSV friendly names → internal codes)
+// ============================================================
+const ISAPRE_MAP = {
+  "banmedica": "BANMEDICA_CL",
+  "bánmedica": "BANMEDICA_CL",
+  "colmena": "COLMENA_CL",
+  "consalud": "CONSALUD_CL",
+  "cruz blanca": "CRUZ_BLANCA_CL",
+  "cruzblanca": "CRUZ_BLANCA_CL",
+  "esencial": "ESENCIAL_CL",
+  "fonasa": "FONASA_CL",
+  "isalud": "ISALUD_CL",
+  "isapre fundacion bancoestado": "ISAPRE_FUNDACION_BANCOESTADO_CL",
+  "fundacion bancoestado": "ISAPRE_FUNDACION_BANCOESTADO_CL",
+  "bancoestado": "ISAPRE_FUNDACION_BANCOESTADO_CL",
+  "masvida": "MASVIDA_CL",
+  "más vida": "MASVIDA_CL",
+  "vida tres": "VIDA_TRES_CL",
+  "vidatres": "VIDA_TRES_CL",
+  // already coded
+  "banmedica_cl": "BANMEDICA_CL",
+  "colmena_cl": "COLMENA_CL",
+  "consalud_cl": "CONSALUD_CL",
+  "cruz_blanca_cl": "CRUZ_BLANCA_CL",
+  "esencial_cl": "ESENCIAL_CL",
+  "fonasa_cl": "FONASA_CL",
+  "isalud_cl": "ISALUD_CL",
+  "isapre_fundacion_bancoestado_cl": "ISAPRE_FUNDACION_BANCOESTADO_CL",
+  "masvida_cl": "MASVIDA_CL",
+  "vida_tres_cl": "VIDA_TRES_CL",
+};
+
+const SEGURO_MAP = {
+  "bci": "BCI_CL",
+  "bci seguros": "BCI_CL",
+  "bice vida": "BICE_VIDA_CL",
+  "bice_vida": "BICE_VIDA_CL",
+  "bupa": "BUPA_CL",
+  "chubb": "CHUBB_CL",
+  "consorcio": "CONSORCIO_CL",
+  "euroamerica": "EUROAMERICA_CL",
+  "euroamérica": "EUROAMERICA_CL",
+  "help": "HELP_SEGUROS_CL",
+  "help seguros": "HELP_SEGUROS_CL",
+  "metlife": "METLIFE_CL",
+  "met life": "METLIFE_CL",
+  "seguros colmena": "SEGUROS_COLMENA_CL",
+  "sura": "SURA_CL",
+  "vida camara": "VIDA_CAMARA_CL",
+  "vida cámara": "VIDA_CAMARA_CL",
+  "vida_camara": "VIDA_CAMARA_CL",
+  "vida security": "VIDA_SECURITY_CL",
+  "vida_security": "VIDA_SECURITY_CL",
+  "zurich": "ZURICH_CL",
+  "zürich": "ZURICH_CL",
+  // already coded
+  "bci_cl": "BCI_CL",
+  "bice_vida_cl": "BICE_VIDA_CL",
+  "bupa_cl": "BUPA_CL",
+  "chubb_cl": "CHUBB_CL",
+  "consorcio_cl": "CONSORCIO_CL",
+  "euroamerica_cl": "EUROAMERICA_CL",
+  "help_seguros_cl": "HELP_SEGUROS_CL",
+  "metlife_cl": "METLIFE_CL",
+  "seguros_colmena_cl": "SEGUROS_COLMENA_CL",
+  "sura_cl": "SURA_CL",
+  "vida_camara_cl": "VIDA_CAMARA_CL",
+  "vida_security_cl": "VIDA_SECURITY_CL",
+  "zurich_cl": "ZURICH_CL",
+};
+
+function normalizeIsapre(v) {
+  if (!v) return null;
+  return ISAPRE_MAP[v.toLowerCase().trim()] || v.trim();
+}
+function normalizeSeguro(v) {
+  if (!v || v.trim() === "") return null;
+  return SEGURO_MAP[v.toLowerCase().trim()] || v.trim();
+}
+
 function parseAndValidate(csv) {
   const lines = csv.split(/\r?\n/).filter(l => l.trim());
   if (lines.length < 2) { toast("El CSV no tiene datos"); return; }
@@ -1141,12 +1222,13 @@ function parseAndValidate(csv) {
     const cols = parseCSVLine(lines[i]);
     if (cols.length < 4) continue;
     const cat = cols[colIdx.categoria];
-    const monto = parseFloat(cols[colIdx.monto]);
-    const isapre = cols[colIdx.isapre];
-    const seguro = colIdx.seguro >= 0 ? cols[colIdx.seguro] : null;
-    const copagoReal = parseFloat(cols[colIdx.copago_real]);
+    const monto = parseFloat((cols[colIdx.monto] || "").replace(/[$.]/g, "").replace(",", "."));
+    const isapre = normalizeIsapre(cols[colIdx.isapre]);
+    const seguroRaw = colIdx.seguro >= 0 ? cols[colIdx.seguro] : null;
+    const seguro = normalizeSeguro(seguroRaw);
+    const copagoReal = parseFloat((cols[colIdx.copago_real] || "").replace(/[$.]/g, "").replace(",", "."));
     if (!cat || isNaN(monto) || !isapre || isNaN(copagoReal)) continue;
-    rows.push({ cat, monto, isapre, seguro: seguro || null, copagoReal });
+    rows.push({ cat, monto, isapre, seguro, copagoReal });
   }
 
   if (rows.length === 0) { toast("No se encontraron filas válidas"); return; }
@@ -1195,7 +1277,9 @@ function parseAndValidate(csv) {
   }).join("");
 
   document.getElementById("val-results").style.display = "block";
-  toast(`${results.length} gastos analizados`);
+  document.getElementById("val-results").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  const sinIsapre = results.filter(r => !r.isapre).length;
+  toast(`${results.length} gastos analizados${sinIsapre > 0 ? ` · ${sinIsapre} sin ISAPRE reconocida` : ""}`);
 }
 
 // ============================================================
