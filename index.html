@@ -662,12 +662,41 @@
           <div class="val-stat-val yellow" id="v-mae">—</div>
         </div>
         <div class="val-stat">
-          <div class="val-stat-label">Estimaciones exactas ±10%</div>
-          <div class="val-stat-val green" id="v-ok">—</div>
+          <div class="val-stat-label">Sesgo del modelo</div>
+          <div class="val-stat-val" id="v-bias">—</div>
         </div>
         <div class="val-stat">
           <div class="val-stat-label">Sin datos suficientes</div>
           <div class="val-stat-val" id="v-nodata">—</div>
+        </div>
+      </div>
+
+      <div class="val-summary">
+        <div class="val-stat">
+          <div class="val-stat-label">Exactas ±10%</div>
+          <div class="val-stat-val green" id="v-ok10">—</div>
+        </div>
+        <div class="val-stat">
+          <div class="val-stat-label">Exactas ±20%</div>
+          <div class="val-stat-val green" id="v-ok20">—</div>
+        </div>
+        <div class="val-stat">
+          <div class="val-stat-label">Exactas ±30%</div>
+          <div class="val-stat-val green" id="v-ok30">—</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Combinaciones extremas</div>
+        <div class="form-grid">
+          <div>
+            <div style="font-size:12px;font-weight:600;color:var(--red);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">Peor estimación</div>
+            <div id="v-worst" class="hint-text" style="margin-top:0;">—</div>
+          </div>
+          <div>
+            <div style="font-size:12px;font-weight:600;color:var(--green);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">Mejor estimación</div>
+            <div id="v-best" class="hint-text" style="margin-top:0;">—</div>
+          </div>
         </div>
       </div>
 
@@ -684,6 +713,7 @@
                 <th>Monto</th>
                 <th>Copago real</th>
                 <th>Estimado</th>
+                <th>Diferencia</th>
                 <th>Desviación</th>
                 <th>Confianza</th>
               </tr>
@@ -1238,21 +1268,75 @@ function parseAndValidate(csv) {
     const r = calcCopago(row.cat, row.monto, row.isapre, row.seguro);
     const estimado = r.copagoMonto;
     const real = row.copagoReal;
-    const diff = estimado !== null ? Math.abs(estimado - real) : null;
-    const diffPct = estimado !== null ? Math.abs(estimado - real) / Math.max(real, 1) : null;
-    return { ...row, estimado, real, diff, diffPct, confianza: r.confianza, fuente: r.fuente };
+    // signedDiff > 0: el modelo sobreestimó el copago (dijo que pagarías más de lo real)
+    // signedDiff < 0: el modelo subestimó el copago (dijo que pagarías menos de lo real)
+    const signedDiff = estimado !== null ? (estimado - real) : null;
+    const diff = signedDiff !== null ? Math.abs(signedDiff) : null;
+    const diffPct = estimado !== null ? Math.abs(signedDiff) / Math.max(real, 1) : null;
+    return { ...row, estimado, real, diff, signedDiff, diffPct, confianza: r.confianza, fuente: r.fuente };
   });
 
   // Stats
   const withData = results.filter(r => r.estimado !== null);
   const noData = results.filter(r => r.estimado === null);
   const mae = withData.length ? Math.round(withData.reduce((s, r) => s + r.diff, 0) / withData.length) : null;
-  const ok = withData.filter(r => r.diffPct <= 0.10).length;
+  const ok10 = withData.filter(r => r.diffPct <= 0.10).length;
+  const ok20 = withData.filter(r => r.diffPct <= 0.20).length;
+  const ok30 = withData.filter(r => r.diffPct <= 0.30).length;
+
+  // Bias: promedio de la diferencia con signo (positivo = sobreestima, negativo = subestima)
+  const avgSignedDiff = withData.length ? Math.round(withData.reduce((s, r) => s + r.signedDiff, 0) / withData.length) : null;
 
   document.getElementById("v-total").textContent = results.length;
   document.getElementById("v-mae").textContent = mae !== null ? fmtMonto(mae) : "—";
-  document.getElementById("v-ok").textContent = withData.length ? `${ok}/${withData.length}` : "—";
+  document.getElementById("v-ok10").textContent = withData.length ? `${ok10}/${withData.length}` : "—";
+  document.getElementById("v-ok20").textContent = withData.length ? `${ok20}/${withData.length}` : "—";
+  document.getElementById("v-ok30").textContent = withData.length ? `${ok30}/${withData.length}` : "—";
   document.getElementById("v-nodata").textContent = noData.length;
+
+  const biasEl = document.getElementById("v-bias");
+  if (avgSignedDiff === null) {
+    biasEl.textContent = "—";
+    biasEl.className = "val-stat-val";
+  } else if (Math.abs(avgSignedDiff) < 500) {
+    biasEl.textContent = "Sin sesgo";
+    biasEl.className = "val-stat-val green";
+  } else if (avgSignedDiff > 0) {
+    biasEl.textContent = "+" + fmtMonto(avgSignedDiff);
+    biasEl.className = "val-stat-val red";
+    biasEl.title = "El modelo sobreestima el copago en promedio";
+  } else {
+    biasEl.textContent = fmtMonto(avgSignedDiff);
+    biasEl.className = "val-stat-val yellow";
+    biasEl.title = "El modelo subestima el copago en promedio";
+  }
+
+  // Worst / best combination grouped by isapre+seguro
+  const groups = {};
+  withData.forEach(r => {
+    const key = `${r.isapre || "—"} + ${r.seguro || "Sin seguro"}`;
+    if (!groups[key]) groups[key] = { key, isapre: r.isapre, seguro: r.seguro, diffs: [], n: 0 };
+    groups[key].diffs.push(r.diffPct);
+    groups[key].n++;
+  });
+  const groupList = Object.values(groups).map(g => ({
+    ...g,
+    avgPct: g.diffs.reduce((a,b) => a+b, 0) / g.diffs.length
+  })).filter(g => g.n >= 2); // need at least 2 cases to be meaningful
+
+  const worstEl = document.getElementById("v-worst");
+  const bestEl = document.getElementById("v-best");
+  if (groupList.length > 0) {
+    const worst = [...groupList].sort((a,b) => b.avgPct - a.avgPct)[0];
+    const best = [...groupList].sort((a,b) => a.avgPct - b.avgPct)[0];
+    worstEl.innerHTML = `<strong>${worst.isapre || "—"}</strong> + <strong>${worst.seguro || "Sin seguro"}</strong><br>
+      Desviación promedio: ${(worst.avgPct*100).toFixed(0)}% · ${worst.n} casos`;
+    bestEl.innerHTML = `<strong>${best.isapre || "—"}</strong> + <strong>${best.seguro || "Sin seguro"}</strong><br>
+      Desviación promedio: ${(best.avgPct*100).toFixed(0)}% · ${best.n} casos`;
+  } else {
+    worstEl.textContent = "No hay suficientes combinaciones repetidas (mínimo 2 casos) para comparar.";
+    bestEl.textContent = "No hay suficientes combinaciones repetidas (mínimo 2 casos) para comparar.";
+  }
 
   // Table
   const tbody = document.getElementById("val-tbody");
@@ -1263,6 +1347,13 @@ function parseAndValidate(csv) {
       else if (r.diffPct <= 0.25) { chipClass = "warn"; chipLabel = "~25%"; }
       else { chipClass = "bad"; chipLabel = ">" + Math.round(r.diffPct * 100) + "%"; }
     }
+    let diffCell = "—";
+    if (r.signedDiff !== null) {
+      const sign = r.signedDiff > 0 ? "+" : "";
+      const color = r.signedDiff > 0 ? "var(--red)" : (r.signedDiff < 0 ? "var(--yellow)" : "var(--muted)");
+      const label = r.signedDiff > 0 ? "sobreestima" : (r.signedDiff < 0 ? "subestima" : "exacto");
+      diffCell = `<span style="color:${color}">${sign}${fmtMonto(r.signedDiff)}</span><br><span style="font-size:10px;color:var(--muted)">${label}</span>`;
+    }
     return `<tr>
       <td style="color:var(--muted)">${i+1}</td>
       <td>${r.cat}</td>
@@ -1271,6 +1362,7 @@ function parseAndValidate(csv) {
       <td class="mono">${fmtMonto(r.monto)}</td>
       <td class="mono"><strong>${fmtMonto(r.real)}</strong></td>
       <td class="mono">${r.estimado !== null ? fmtMonto(r.estimado) : "—"}</td>
+      <td class="mono">${diffCell}</td>
       <td><span class="chip ${chipClass}">${chipLabel}</span></td>
       <td><span class="alt-badge ${confClass(r.confianza)}" style="font-size:11px">${r.confianza}</span></td>
     </tr>`;
