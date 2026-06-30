@@ -701,6 +701,14 @@
       </div>
 
       <div class="card">
+        <div class="card-title">Aprendizaje del modelo</div>
+        <p class="hint-text" style="margin-top:0;">Si esta data se ve confiable, puedes incorporarla al modelo para que las próximas estimaciones sean más precisas. Se combina ponderando por número de casos, no reemplaza la data existente.</p>
+        <div id="model-status" style="font-size:12px;color:var(--muted);margin:12px 0;"></div>
+        <button class="btn-primary" style="margin-top:4px;" onclick="addDataToModel()">Agregar data al modelo →</button>
+        <button class="btn-secondary" style="margin-top:10px;" onclick="resetModel()">Restablecer modelo original</button>
+      </div>
+
+      <div class="card">
         <div class="card-title">Resultados por gasto</div>
         <div style="overflow-x:auto;">
           <table class="results-table" id="val-table">
@@ -743,6 +751,44 @@ const T3 = {};
 RAW.t1.forEach(r => { T1[r.key] = r; });
 RAW.t2.forEach(r => { T2[r.key] = r; });
 RAW.t3.forEach(r => { T3[r.key] = r; });
+
+// ============================================================
+// PERSISTENCIA: cargar ajustes guardados en localStorage (si existen)
+// ============================================================
+const STORAGE_KEY = "skip_copago_model_v1";
+
+function loadStoredModel() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const stored = JSON.parse(raw);
+    if (stored.t1) Object.assign(T1, stored.t1);
+    if (stored.t2) Object.assign(T2, stored.t2);
+    if (stored.t3) Object.assign(T3, stored.t3);
+  } catch(e) {
+    console.error("No se pudo cargar el modelo guardado:", e);
+  }
+}
+loadStoredModel();
+
+function saveStoredModel() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ t1: T1, t2: T2, t3: T3, savedAt: new Date().toISOString() }));
+    return true;
+  } catch(e) {
+    console.error("No se pudo guardar el modelo:", e);
+    return false;
+  }
+}
+
+function getModelInfo() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const stored = JSON.parse(raw);
+    return stored.savedAt || null;
+  } catch(e) { return null; }
+}
 
 // ============================================================
 // TRAMO DETECTION
@@ -1231,6 +1277,124 @@ function normalizeSeguro(v) {
   return SEGURO_MAP[v.toLowerCase().trim()] || v.trim();
 }
 
+let lastUploadedRows = [];
+
+// ============================================================
+// AGREGAR DATA AL MODELO (merge ponderado por n)
+// ============================================================
+function weightedMerge(oldVal, oldN, newVal, newN) {
+  if (oldN === 0) return newVal;
+  if (newN === 0) return oldVal;
+  return (oldVal * oldN + newVal * newN) / (oldN + newN);
+}
+
+function addDataToModel() {
+  if (!lastUploadedRows || lastUploadedRows.length === 0) {
+    toast("Primero sube un CSV con gastos para validar");
+    return;
+  }
+
+  // Group new data by category+tramo+isapre (T1), category+tramo+seguro (T2), and the combined T3
+  const t1Groups = {};
+  const t2Groups = {};
+  const t3Groups = {};
+
+  lastUploadedRows.forEach(row => {
+    const tramo = getTramo(row.cat, row.monto);
+    const copagoPct = row.monto > 0 ? row.copagoReal / row.monto : null;
+    if (copagoPct === null || isNaN(copagoPct)) return;
+    const coberturaPct = 1 - copagoPct; // cobertura total observada en este caso
+
+    if (row.isapre) {
+      const k1 = `${row.cat}|${tramo}|${row.isapre}`;
+      if (!t1Groups[k1]) t1Groups[k1] = { categoria: row.cat, tramo, isapre: row.isapre, vals: [] };
+      t1Groups[k1].vals.push(coberturaPct);
+    }
+    if (row.seguro) {
+      const k2 = `${row.cat}|${tramo}|${row.seguro}`;
+      if (!t2Groups[k2]) t2Groups[k2] = { categoria: row.cat, tramo, seguro: row.seguro, vals: [] };
+      t2Groups[k2].vals.push(coberturaPct);
+    }
+    if (row.isapre && row.seguro) {
+      const k3 = `${row.cat}|${tramo}|${row.isapre}|${row.seguro}`;
+      if (!t3Groups[k3]) t3Groups[k3] = { categoria: row.cat, tramo, isapre: row.isapre, seguro: row.seguro, vals: [] };
+      t3Groups[k3].vals.push(copagoPct);
+    }
+  });
+
+  let updated1 = 0, updated2 = 0, updated3 = 0;
+
+  Object.entries(t1Groups).forEach(([key, g]) => {
+    const newN = g.vals.length;
+    const newMed = g.vals.reduce((a,b) => a+b, 0) / newN;
+    const existing = T1[key];
+    if (existing) {
+      const oldN = existing.n_actual || 0;
+      const oldMed = existing.cob_actual_med || 0;
+      T1[key] = { ...existing, cob_actual_med: weightedMerge(oldMed, oldN, newMed, newN), n_actual: oldN + newN };
+    } else {
+      T1[key] = { key, categoria: g.categoria, tramo: g.tramo, isapre: g.isapre, n_actual: newN, cob_actual_med: newMed, cob_act_p25: newMed, cob_act_p75: newMed, n_historico: 0, cob_hist_med: null, cob_hist_p25: null, cob_hist_p75: null };
+    }
+    updated1++;
+  });
+
+  Object.entries(t2Groups).forEach(([key, g]) => {
+    const newN = g.vals.length;
+    const newMed = g.vals.reduce((a,b) => a+b, 0) / newN;
+    const existing = T2[key];
+    if (existing) {
+      const oldN = existing.n_actual || 0;
+      const oldMed = existing.cob_actual_med || 0;
+      T2[key] = { ...existing, cob_actual_med: weightedMerge(oldMed, oldN, newMed, newN), n_actual: oldN + newN };
+    } else {
+      T2[key] = { key, categoria: g.categoria, tramo: g.tramo, seguro: g.seguro, n_actual: newN, cob_actual_med: newMed, cob_act_p25: newMed, cob_act_p75: newMed, n_historico: 0, cob_hist_med: null, cob_hist_p25: null, cob_hist_p75: null };
+    }
+    updated2++;
+  });
+
+  Object.entries(t3Groups).forEach(([key, g]) => {
+    const newN = g.vals.length;
+    const newMed = g.vals.reduce((a,b) => a+b, 0) / newN;
+    const existing = T3[key];
+    if (existing) {
+      const oldN = existing.n_actual || 0;
+      const oldMed = existing.copago_act_med || 0;
+      T3[key] = { ...existing, copago_act_med: weightedMerge(oldMed, oldN, newMed, newN), n_actual: oldN + newN };
+    } else {
+      T3[key] = { key, categoria: g.categoria, tramo: g.tramo, isapre: g.isapre, seguro: g.seguro, n_actual: newN, copago_act_med: newMed, copago_act_p25: newMed, copago_act_p75: newMed, n_historico: 0, copago_hist_med: null, copago_hist_p25: null, copago_hist_p75: null, n_total: newN };
+    }
+    updated3++;
+  });
+
+  const saved = saveStoredModel();
+  if (saved) {
+    toast(`Modelo actualizado: ${updated1} combos ISAPRE, ${updated2} combos seguro, ${updated3} combos directos`);
+    updateModelStatus();
+    lastUploadedRows = [];
+  } else {
+    toast("No se pudo guardar el modelo (espacio de almacenamiento lleno o bloqueado)");
+  }
+}
+
+function resetModel() {
+  if (!confirm("¿Restablecer el modelo a su versión original? Se perderán todos los ajustes guardados localmente.")) return;
+  localStorage.removeItem(STORAGE_KEY);
+  toast("Modelo restablecido. Recarga la página para aplicar los cambios.");
+  updateModelStatus();
+}
+
+function updateModelStatus() {
+  const el = document.getElementById("model-status");
+  if (!el) return;
+  const savedAt = getModelInfo();
+  if (savedAt) {
+    const d = new Date(savedAt);
+    el.textContent = `Modelo con ajustes guardados localmente · última actualización: ${d.toLocaleDateString("es-CL")} ${d.toLocaleTimeString("es-CL", {hour:"2-digit", minute:"2-digit"})}`;
+  } else {
+    el.textContent = "Usando el modelo original (sin ajustes guardados).";
+  }
+}
+
 function parseAndValidate(csv) {
   const lines = csv.split(/\r?\n/).filter(l => l.trim());
   if (lines.length < 2) { toast("El CSV no tiene datos"); return; }
@@ -1262,6 +1426,7 @@ function parseAndValidate(csv) {
   }
 
   if (rows.length === 0) { toast("No se encontraron filas válidas"); return; }
+  lastUploadedRows = rows;
 
   // Run model on each row
   const results = rows.map((row, idx) => {
@@ -1390,6 +1555,9 @@ document.addEventListener("keydown", e => {
     calcular();
   }
 });
+
+// Show model status on load
+updateModelStatus();
 </script>
 </body>
 </html>
